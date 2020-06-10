@@ -29,6 +29,7 @@
 #include <sys/ioctl.h>
 #include <syslog.h>
 
+#include <ctype.h>
 #include <stddef.h>
 #include "port-sockets.h"
 #include "socket-utils.h"
@@ -66,6 +67,8 @@
 
 /* XXX */
 #define KDC5_NONET                               (-1779992062L)
+#define PROXY_PROTOCOL_HEADER                       "PROX"
+#define KERBEROS_PROTOCOL_HEADER_SIZE           4
 
 static int tcp_or_rpc_data_counter;
 static int max_tcp_or_rpc_data_connections = 45;
@@ -153,6 +156,11 @@ struct connection {
     /* RPC-specific fields */
     SVCXPRT *transp;
     int rpc_force_close;
+
+    // 支持proxy protocol字段
+    int proxy_header_len;
+    krb5_address real_remote_addr_buf;
+    krb5_fulladdr real_remote_addr;
 };
 
 #define SET(TYPE) struct { TYPE *data; size_t n, max; }
@@ -451,6 +459,9 @@ free_connection(struct connection *conn)
         free(conn->buffer);
     if (conn->type == CONN_RPC_LISTENER && conn->transp != NULL)
         svc_destroy(conn->transp);
+    if (conn->real_remote_addr.address && conn->real_remote_addr.address->contents) {
+        free(conn->real_remote_addr.address->contents);
+    }
     free(conn);
 }
 
@@ -1259,6 +1270,140 @@ prepare_for_dispatch(verto_ctx *ctx, verto_ev *ev)
 }
 
 static void
+split(char *str, int str_len, char target, char* splits[])
+{
+    for (int i = 0, begin = 0, split_idx = 0; i < str_len; i++)
+    {
+        if (target == str[i]) {
+            str[i] = '\0';
+            splits[split_idx++] = (str + begin);
+            begin = i + 1;
+        }
+    }
+}
+
+static uint32_t
+parse_ipv4_string(char* ip) 
+{
+	char c;
+	unsigned int integer;
+	int val;
+	int i,j=0;
+	c = *ip;
+	for (j=0;j<4;j++) {
+		if (!isdigit(c)){  //first char is 0
+			return (0);
+		}
+		val=0;
+		for (i=0;i<3;i++) {
+			if (isdigit(c)) {
+				val = (val * 10) + (c - '0');
+				c = *++ip;
+			} else
+				break;
+		}
+		if(val<0 || val>255){
+			return (0);	
+		}	
+		if (c == '.') {
+			integer=(integer<<8) | val;
+			c = *++ip;
+		} 
+		else if(j==3 && c == '\0'){
+			integer=(integer<<8) | val;
+			break;
+		}
+			
+	}
+	if(c != '\0'){
+		return (0);	
+	}
+	return (htonl(integer));
+}
+
+static bool_t
+read_proxy_protocol(struct connection *conn, verto_ev *ev, int *protocol_length)
+{
+    int min_read_size = sizeof("PROXY TCP4 0.0.0.0 0.0.0.0 35 35\r\n") - 1;
+    int max_read_size = sizeof("PROXY TCP4 000.000.000.000 000.000.000.000 65535 65535\r\n") - 1;
+    int fd = verto_get_fd(ev);
+    char *buf = conn->buffer + conn->offset;
+    ssize_t nread = SOCKET_READ(fd, buf, min_read_size);
+    bool_t has_r = FALSE;
+    if (nread < min_read_size) {
+        return FALSE;
+    }
+
+    if (buf[min_read_size - 2] == '\r' && buf[min_read_size - 1] == '\n') {
+        *protocol_length = min_read_size;
+        return TRUE;
+    }
+    if (buf[min_read_size - 1] == '\r') {
+        has_r = TRUE;
+    }
+
+    buf += min_read_size;
+    for (int i = 0; i < max_read_size - min_read_size; i++) {
+        if (SOCKET_READ(fd, buf + i, 1) != 1) {
+            return -1;
+        }
+        if (has_r) {
+            if (buf[i] == '\n') {
+                *protocol_length = min_read_size + i + 1 + conn->offset;
+                return TRUE;
+            } else {
+                return FALSE;
+            }
+        } else if (buf[i] == '\r') {
+            has_r = TRUE;
+        }
+    }
+    return FALSE;
+}
+
+// 暂不支持ipv6
+static bool_t
+handle_proxy_protocol(struct connection *conn, verto_ev *ev)
+{
+    int protocol_length = 0;
+    char c = ' ';
+    char* splits[6];
+    char *src_ip;
+    char *src_port;
+    uint32_t *ip_int;
+
+
+    if (strncmp(conn->buffer, PROXY_PROTOCOL_HEADER, sizeof(PROXY_PROTOCOL_HEADER) - 1) != 0) {
+        return TRUE;
+    }
+    if (!read_proxy_protocol(conn, ev, &protocol_length)) {
+        return FALSE;
+    }
+    conn->proxy_header_len = protocol_length;
+    conn->offset += protocol_length - KERBEROS_PROTOCOL_HEADER_SIZE;    // 预读的4字节
+    split(conn->buffer, protocol_length, c, splits);
+    src_ip = splits[2];
+    src_port = splits[4];
+
+    conn->real_remote_addr.address = &conn->real_remote_addr_buf;
+    conn->real_remote_addr.address->addrtype = ADDRTYPE_INET;
+    conn->real_remote_addr.address->length = 4;
+    ip_int = malloc(sizeof(uint32_t));
+    *ip_int = parse_ipv4_string(src_ip);
+    conn->real_remote_addr.address->contents = (krb5_octet *)ip_int;
+    conn->real_remote_addr.port = atoi(src_port);
+
+    // 读原始协议的4字节出来
+    if (SOCKET_READ(verto_get_fd(ev), 
+        conn->buffer + conn->offset, 
+        KERBEROS_PROTOCOL_HEADER_SIZE) != KERBEROS_PROTOCOL_HEADER_SIZE) {
+            return FALSE;
+    }
+    conn->offset += KERBEROS_PROTOCOL_HEADER_SIZE;
+    return TRUE;
+}
+
+static void
 process_tcp_connection_read(verto_ctx *ctx, verto_ev *ev)
 {
     struct tcp_dispatch_state *state = NULL;
@@ -1274,12 +1419,12 @@ process_tcp_connection_read(verto_ctx *ctx, verto_ev *ev)
      * we should only be here if there is no data in the buffer, or only an
      * incomplete message.
      */
-    if (conn->offset < 4) {
+    if (conn->offset < KERBEROS_PROTOCOL_HEADER_SIZE) {
         krb5_data *response = NULL;
 
         /* msglen has not been computed.  XXX Doing at least two reads
          * here, letting the kernel worry about buffering. */
-        len = 4 - conn->offset;
+        len = KERBEROS_PROTOCOL_HEADER_SIZE - conn->offset;
         nread = SOCKET_READ(verto_get_fd(ev),
                             conn->buffer + conn->offset, len);
         if (nread < 0) /* error */
@@ -1287,16 +1432,21 @@ process_tcp_connection_read(verto_ctx *ctx, verto_ev *ev)
         if (nread == 0) /* eof */
             goto kill_tcp_connection;
         conn->offset += nread;
-        if (conn->offset == 4) {
-            unsigned char *p = (unsigned char *)conn->buffer;
+        if (conn->offset == KERBEROS_PROTOCOL_HEADER_SIZE) {
+            unsigned char *p;
+            // todo 判断是否是proxy protocol
+            if (!handle_proxy_protocol(conn, ev)) {
+                goto kill_tcp_connection;
+            }
+            p = (unsigned char *)(conn->buffer + conn->offset - KERBEROS_PROTOCOL_HEADER_SIZE);
             conn->msglen = load_32_be(p);
-            if (conn->msglen > conn->bufsiz - 4) {
+            if (conn->msglen > conn->bufsiz - KERBEROS_PROTOCOL_HEADER_SIZE) {
                 krb5_error_code err;
                 /* Message too big. */
                 krb5_klog_syslog(LOG_ERR, _("TCP client %s wants %lu bytes, "
                                             "cap is %lu"), conn->addrbuf,
                                  (unsigned long) conn->msglen,
-                                 (unsigned long) conn->bufsiz - 4);
+                                 (unsigned long) conn->bufsiz - KERBEROS_PROTOCOL_HEADER_SIZE);
                 /* XXX Should return an error.  */
                 err = make_toolong_error (conn->handle,
                                           &response);
@@ -1319,7 +1469,7 @@ process_tcp_connection_read(verto_ctx *ctx, verto_ev *ev)
         /* msglen known. */
         socklen_t local_saddrlen = sizeof(struct sockaddr_storage);
 
-        len = conn->msglen - (conn->offset - 4);
+        len = conn->msglen - (conn->offset - conn->proxy_header_len - KERBEROS_PROTOCOL_HEADER_SIZE);
         nread = SOCKET_READ(verto_get_fd(ev),
                             conn->buffer + conn->offset, len);
         if (nread < 0) /* error */
@@ -1327,7 +1477,7 @@ process_tcp_connection_read(verto_ctx *ctx, verto_ev *ev)
         if (nread == 0) /* eof */
             goto kill_tcp_connection;
         conn->offset += nread;
-        if (conn->offset < conn->msglen + 4)
+        if (conn->offset < conn->proxy_header_len + conn->msglen + KERBEROS_PROTOCOL_HEADER_SIZE)
             return;
 
         /* Have a complete message, and exactly one message. */
@@ -1336,7 +1486,7 @@ process_tcp_connection_read(verto_ctx *ctx, verto_ev *ev)
             goto kill_tcp_connection;
 
         state->request.length = conn->msglen;
-        state->request.data = conn->buffer + 4;
+        state->request.data = conn->buffer + conn->proxy_header_len + KERBEROS_PROTOCOL_HEADER_SIZE;
 
         if (getsockname(verto_get_fd(ev), ss2sa(&state->local_saddr),
                         &local_saddrlen) < 0) {
@@ -1346,7 +1496,7 @@ process_tcp_connection_read(verto_ctx *ctx, verto_ev *ev)
         }
         state->local_addr.address = &state->local_addr_buf;
         init_addr(&state->local_addr, ss2sa(&state->local_saddr));
-        dispatch(state->conn->handle, &state->local_addr, &conn->remote_addr,
+        dispatch(state->conn->handle, &state->local_addr, conn->proxy_header_len > 0 ? &conn->real_remote_addr : &conn->remote_addr,
                  &state->request, 1, ctx, process_tcp_response, state);
     }
 
