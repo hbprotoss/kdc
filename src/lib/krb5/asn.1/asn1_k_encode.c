@@ -503,7 +503,6 @@ static krb5_error_code
 decode_kdc_req_body(const taginfo *t, const uint8_t *asn1, size_t len,
                     void *val)
 {
-    struct timeval tv;
     krb5_error_code ret;
     kdc_req_hack h;
     krb5_kdc_req *b = val;
@@ -511,8 +510,6 @@ decode_kdc_req_body(const taginfo *t, const uint8_t *asn1, size_t len,
     ret = k5_asn1_decode_atype(t, asn1, len, &k5_atype_kdc_req_body_hack, &h);
     if (ret)
         return ret;
-    gettimeofday(&tv, NULL);
-    b->begin_time_ms = tv.tv_sec * 1000 + tv.tv_usec / 1000;
     b->kdc_options = h.v.kdc_options;
     b->client = h.v.client;
     b->server = h.v.server;

@@ -35,6 +35,7 @@
         "istream": "cpp",
         "limits": "cpp",
         "tuple": "cpp",
-        "utility": "cpp"
+        "utility": "cpp",
+        "system_error": "c"
     }
 }

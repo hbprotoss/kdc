@@ -123,12 +123,15 @@ dispatch(void *cb, const krb5_fulladdr *local_addr,
          const krb5_fulladdr *remote_addr, krb5_data *pkt, int is_tcp,
          verto_ctx *vctx, loop_respond_fn respond, void *arg)
 {
+    struct timeval tv;
     krb5_error_code retval;
     krb5_kdc_req *req = NULL;
     krb5_data *response = NULL;
     struct dispatch_state *state;
     struct server_handle *handle = cb;
     krb5_context kdc_err_context = handle->kdc_err_context;
+
+    gettimeofday(&tv, NULL);
 
     state = k5alloc(sizeof(*state), &retval);
     if (state == NULL) {
@@ -182,6 +185,7 @@ dispatch(void *cb, const krb5_fulladdr *local_addr,
         retval = decode_krb5_as_req(pkt, &req);
     else
         retval = KRB5KRB_AP_ERR_MSG_TYPE;
+    req->begin_time_ms = tv.tv_sec * 1000 + tv.tv_usec / 1000;
     if (retval)
         goto done;
 
