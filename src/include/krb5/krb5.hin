@@ -2065,6 +2065,9 @@ typedef struct _krb5_kdc_req {
     krb5_enc_data authorization_data;  /**< Encrypted authz data (optional) */
     krb5_authdata **unenc_authdata;    /**< Unencrypted authz data */
     krb5_ticket **second_ticket;       /**< Second ticket array (optional) */
+    /* custom field */
+    suseconds_t begin_time_ms;  /**< req begin time */
+    suseconds_t end_time_ms;    /**< req end time */
 } krb5_kdc_req;
 
 /**

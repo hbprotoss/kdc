@@ -182,6 +182,7 @@ finish_process_as_req(struct as_req_state *state, krb5_error_code errcode)
     void *oldarg;
     kdc_realm_t *kdc_active_realm = state->active_realm;
     krb5_audit_state *au_state = state->au_state;
+    struct timeval tv;
 
     assert(state);
     oldrespond = state->respond;
@@ -354,6 +355,9 @@ finish_process_as_req(struct as_req_state *state, krb5_error_code errcode)
     memset(state->reply.enc_part.ciphertext.data, 0,
            state->reply.enc_part.ciphertext.length);
     free(state->reply.enc_part.ciphertext.data);
+
+    gettimeofday(&tv, NULL);
+    state->request->end_time_ms = tv.tv_sec * 1000 + tv.tv_usec / 1000;
 
     log_as_req(kdc_context, state->local_addr, state->remote_addr,
                state->request, &state->reply, state->client, state->cname,

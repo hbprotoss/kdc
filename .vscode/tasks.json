@@ -3,9 +3,29 @@
 	"tasks": [
 		{
 			"type": "shell",
-			"label": "C/C++: gcc build active file",
+			"label": "make",
 			"command": "make",
-			"args": ["-e", "CFLAGS=' -g -O0'"],
+			"args": ["-e", "CFLAGS=' -g -O0 '"],
+			"options": {
+				"cwd": "${workspaceFolder}/src/output"
+			},
+			"group": "build"
+		},
+		{
+			"type": "shell",
+			"label": "make clean",
+			"command": "make",
+			"args": ["clean"],
+			"options": {
+				"cwd": "${workspaceFolder}/src/output"
+			},
+			"group": "build"
+		},
+		{
+			"type": "shell",
+			"label": "make install",
+			"command": "make",
+			"args": ["install"],
 			"options": {
 				"cwd": "${workspaceFolder}/src/output"
 			},

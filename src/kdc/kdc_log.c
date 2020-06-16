@@ -81,9 +81,9 @@ log_as_req(krb5_context context,
         /* success */
         char rep_etypestr[128];
         rep_etypes2str(rep_etypestr, sizeof(rep_etypestr), reply);
-        krb5_klog_syslog(LOG_INFO, _("AS_REQ (%s) %s: ISSUE: authtime %u, %s, "
+        krb5_klog_syslog(LOG_INFO, _("AS_REQ (%s) %s: ISSUE: authtime %u, cost %ld ms, %s, "
                                      "%s for %s"),
-                         ktypestr, fromstring, (unsigned int)authtime,
+                         ktypestr, fromstring, (unsigned int)authtime, request->end_time_ms - request->begin_time_ms,
                          rep_etypestr, cname2, sname2);
     } else {
         /* fail */
